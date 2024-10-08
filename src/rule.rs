@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use tracing::{debug, Level};
 
 use crate::{
@@ -5,11 +6,36 @@ use crate::{
     instance::{Instance, Instances},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Rule {
     pub consequent: usize,
     pub antds: Vec<NominalAntd>,
     pub min_no: usize,
+}
+
+impl std::fmt::Debug for Rule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "({}) => {}",
+            self.antds
+                .iter()
+                .map(|antd| {
+                    let attr_info = antd
+                        .attr
+                        .attribute_info
+                        .as_ref()
+                        .expect("Should have attribute info");
+                    format!(
+                        "{} = {}",
+                        antd.attr.name,
+                        attr_info.values.get(antd.value).unwrap()
+                    )
+                })
+                .join(" & "),
+            self.consequent,
+        )
+    }
 }
 
 impl Rule {
@@ -23,7 +49,6 @@ impl Rule {
 
     pub fn grow(&mut self, data: &mut Instances) -> Result<(), String> {
         let mut grow_data = data.clone();
-        dbg!(&grow_data.instances.len());
         let sum_of_weights = grow_data.instances.len();
         if !(sum_of_weights > 0) {
             debug!("Not enough instances to grow");
@@ -51,7 +76,7 @@ impl Rule {
 
             // Build one condition based on all attributes not used yet
             for (i, attr) in grow_data.attributes.borrow().iter().enumerate() {
-                debug!("\nOne condition: size = {}", grow_data.instances.len());
+                debug!("One condition: size = {}", grow_data.instances.len());
 
                 // todo: performance opportunity
                 let mut antd: NominalAntd = NominalAntd::new(attr.clone());
@@ -105,8 +130,8 @@ impl Rule {
         let def_accu = self.compute_def_accu(&data);
 
         debug!(
-            "Pruning with {} positive data out of {} instances",
-            def_accu, total
+            "Pruning with default accuracy {}, across {} negative instances: \n{:#?}",
+            def_accu, total, data.instances
         );
 
         let size = self.antds.len();
@@ -148,6 +173,7 @@ impl Rule {
                 worth_rt[x] = (worth_value[x] + 1.0) / (coverage[x] + 2.0);
             }
         }
+        dbg!(&worth_rt, &coverage, &worth_value);
 
         let mut max_value = (def_accu + 1.0) / (total as f64 + 2.0);
         let mut max_index = -1;
@@ -172,9 +198,10 @@ impl Rule {
         }
     }
 
-    pub fn clean_up(mut self, data: &Instances) {
+    pub fn clean_up(&mut self, data: &Instances) {
+        // this is only for numberic attributes, not needed for us
         // Implementation of cleanUp method
-        unimplemented!()
+        // unimplemented!()
     }
 
     pub fn covers(&self, datum: &Instance) -> bool {

@@ -1,15 +1,18 @@
 // rule_set.rs
 
-#[derive(Debug, Clone, Default)]
+use crate::rule::Rule;
+
+#[derive(Clone, Default)]
 pub struct RuleSet {
-    pub extension: Vec<Extension>,
-    pub rule_selection_method: Vec<RuleSelectionMethod>,
-    pub score_distribution: Vec<ScoreDistribution>,
-    pub rule: Vec<Rule>,
-    pub default_confidence: Option<f64>,
-    pub default_score: Option<String>,
-    pub nb_correct: Option<f64>,
-    pub record_count: Option<f64>,
+    pub rules: Vec<Rule>,
+    // pub extension: Vec<Extension>,
+    // pub rule_selection_method: Vec<RuleSelectionMethod>,
+    // pub score_distribution: Vec<ScoreDistribution>,
+    // pub rule: Vec<Rule>,
+    // pub default_confidence: Option<f64>,
+    // pub default_score: Option<String>,
+    // pub nb_correct: Option<f64>,
+    // pub record_count: Option<f64>,
 }
 
 impl RuleSet {
@@ -18,33 +21,8 @@ impl RuleSet {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Extension {
-    // Add fields as needed
-}
-
-#[derive(Debug, Clone)]
-pub struct RuleSelectionMethod {
-    // Add fields as needed
-}
-
-#[derive(Debug, Clone)]
-pub struct ScoreDistribution {
-    // Add fields as needed
-}
-
-#[derive(Debug, Clone)]
-pub enum Rule {
-    SimpleRule(SimpleRule),
-    CompoundRule(CompoundRule),
-}
-
-#[derive(Debug, Clone)]
-pub struct SimpleRule {
-    // Add fields as needed
-}
-
-#[derive(Debug, Clone)]
-pub struct CompoundRule {
-    // Add fields as needed
+impl std::fmt::Debug for RuleSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RuleSet {{ rules: {:?} }}", self.rules)
+    }
 }

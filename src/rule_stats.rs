@@ -1,8 +1,11 @@
 // rule_stats.rs
 
-use rand::seq::SliceRandom;
+use std::borrow::Borrow;
 
-use crate::{Instances, Rule};
+use rand::seq::SliceRandom;
+use tracing::debug;
+
+use crate::{get_seeded_rng, Instances, Rule};
 
 const REDUNDANCY_FACTOR: f64 = 0.5;
 const MDL_THEORY_WEIGHT: f64 = 1.0;
@@ -100,8 +103,28 @@ impl RuleStats {
     }
 
     pub fn count_data(&mut self) {
-        // Implementation of countData
-        unimplemented!()
+        if self.filtered_instances.is_some() || self.ruleset.is_none() || self.data.is_none() {
+            return;
+        }
+
+        let size = self.ruleset.as_ref().unwrap().len();
+        self.filtered_instances = Some(Vec::with_capacity(size));
+        self.simple_stats = Some(Vec::with_capacity(size));
+        self.distributions = Some(Vec::with_capacity(size));
+        let mut data = self.data.as_ref().unwrap().clone();
+
+        for i in 0..size {
+            let mut stats = [0.0; 6]; // 6 statistics parameters
+            let mut class_counts = vec![0.0; self.data.as_ref().unwrap().num_classes()];
+            let filtered = self.compute_simple_stats(i, &data, &mut stats, Some(&mut class_counts));
+            self.filtered_instances
+                .as_mut()
+                .unwrap()
+                .push(filtered.clone());
+            self.simple_stats.as_mut().unwrap().push(stats.to_vec());
+            self.distributions.as_mut().unwrap().push(class_counts);
+            data = filtered.1.clone(); // Data not covered
+        }
     }
 
     pub fn count_data_from(
@@ -368,23 +391,98 @@ impl RuleStats {
     }
 
     pub fn relative_dl(&self, index: usize, exp_fp_rate: f64) -> f64 {
-        return (self.min_data_dl_if_exists(index, exp_fp_rate) + self.theory_dl(index)
-            - self.min_data_dl_if_deleted(index, exp_fp_rate));
+        return self.min_data_dl_if_exists(index, exp_fp_rate) + self.theory_dl(index)
+            - self.min_data_dl_if_deleted(index, exp_fp_rate);
     }
 
     pub fn reduce_dl(&mut self, exp_fp_rate: f64) {
-        // Implementation of reduceDL
-        unimplemented!()
+        let mut need_update = false;
+        let mut ruleset_stat = [0.0; 6];
+        let simple_stats = self
+            .simple_stats
+            .as_ref()
+            .expect("Should have stats")
+            .clone();
+
+        for (j, simple_stat) in simple_stats.iter().enumerate() {
+            // Covered stats are cumulative
+            ruleset_stat[0] += simple_stat[0];
+            ruleset_stat[2] += simple_stat[2];
+            ruleset_stat[4] += simple_stat[4];
+            if j == simple_stats.len() - 1 {
+                // Last rule
+                ruleset_stat[1] = simple_stat[1];
+                ruleset_stat[3] = simple_stat[3];
+                ruleset_stat[5] = simple_stat[5];
+            }
+        }
+
+        // Potential
+        let mut to_remove = Vec::new();
+        for k in (0..simple_stats.len()).rev() {
+            let rule_stat = simple_stats.get(k).expect("Should have simple stats at k");
+
+            // ruleset_stat updated
+            let if_deleted = self.potential(k, exp_fp_rate, &mut ruleset_stat, &rule_stat);
+            if !if_deleted.is_nan() {
+                // Uncomment for debugging
+                // println!("!!!deleted ({}): save {} | {} | {} | {} | {}",
+                //          k, if_deleted, ruleset_stat[0], ruleset_stat[1], ruleset_stat[4], ruleset_stat[5]);
+
+                if k == simple_stats.len() - 1 {
+                    self.remove_last();
+                } else {
+                    to_remove.push(k);
+                    need_update = true;
+                }
+            }
+        }
+
+        // Remove rules in reverse order to maintain correct indices
+        for &k in to_remove.iter().rev() {
+            self.ruleset
+                .as_mut()
+                .expect("Should have ruleset")
+                .remove(k);
+        }
+
+        if need_update {
+            self.filtered_instances = None;
+            self.simple_stats = None;
+            self.count_data();
+        }
     }
 
     pub fn remove_last(&mut self) {
-        // Implementation of removeLast
-        unimplemented!()
+        if let Some(ruleset) = self.ruleset.as_mut() {
+            ruleset.pop();
+        }
+        if let Some(filtered) = self.filtered_instances.as_mut() {
+            filtered.pop();
+        }
+        if let Some(simple_stats) = self.simple_stats.as_mut() {
+            simple_stats.pop();
+        }
+        if let Some(distributions) = self.distributions.as_mut() {
+            distributions.pop();
+        }
     }
 
     pub fn rm_covered_by_successives(data: &Instances, rules: &[Rule], index: usize) -> Instances {
-        // Implementation of rmCoveredBySuccessives
-        unimplemented!()
+        let mut rt = Instances::new(data.attributes.clone());
+
+        for datum in &data.instances {
+            let covered = rules
+                .iter()
+                .skip(index + 1)
+                .any(|rule| rule.covers(&datum.borrow()));
+
+            if !covered {
+                rt.instances.push(datum.clone());
+            }
+        }
+
+        rt
     }
 
     pub fn stratify(data: &Instances, folds: usize) -> Instances {
@@ -402,7 +500,7 @@ impl RuleStats {
 
         // shuffle each bag
         for bag in bags_by_classes.iter_mut() {
-            bag.instances.shuffle(&mut rand::thread_rng());
+            bag.instances.shuffle(&mut get_seeded_rng());
         }
 
         // fold stuff
@@ -433,9 +531,20 @@ impl RuleStats {
         unimplemented!()
     }
 
-    pub fn partition(data: &Instances, num_folds: usize) -> Vec<Instances> {
-        // Implementation of partition
-        unimplemented!()
+    pub fn partition(data: &Instances, num_folds: usize) -> (Instances, Instances) {
+        let splits = data.instances.len() * (num_folds - 1) / num_folds;
+
+        let first_partition = Instances {
+            attributes: data.attributes.clone(),
+            instances: data.instances[0..splits].to_vec(),
+        };
+
+        let second_partition = Instances {
+            attributes: data.attributes.clone(),
+            instances: data.instances[splits..].to_vec(),
+        };
+
+        (first_partition, second_partition)
     }
 
     pub fn subset_dl(t: f64, k: f64, p: f64) -> f64 {
@@ -519,5 +628,67 @@ impl RuleStats {
         }
 
         (covered_instances, not_covered_instances)
+    }
+
+    pub fn count_data_with(
+        &mut self,
+        index: usize,
+        uncovered: &Instances,
+        prev_rule_stats: &[&Vec<f64>],
+    ) {
+        if self.filtered_instances.is_some() || self.ruleset.is_none() {
+            debug!(
+                "Returning early, filtered instances is {} and ruleset is {}",
+                if self.filtered_instances.is_some() {
+                    "not None"
+                } else {
+                    "None"
+                },
+                if self.ruleset.is_some() {
+                    "not None"
+                } else {
+                    "None"
+                }
+            );
+            return;
+        }
+
+        let size = self.ruleset.as_ref().unwrap().len();
+        self.filtered_instances = Some(Vec::with_capacity(size));
+        self.simple_stats = Some(Vec::with_capacity(size));
+        let mut data: (Instances, Instances) = (
+            Instances::new(uncovered.attributes.clone()),
+            uncovered.clone(),
+        );
+
+        for i in 0..index {
+            self.simple_stats
+                .as_mut()
+                .unwrap()
+                .push(prev_rule_stats[i].to_vec());
+            if i + 1 == index {
+                self.filtered_instances.as_mut().unwrap().push((
+                    Instances::new(uncovered.attributes.clone()),
+                    uncovered.clone(),
+                ));
+            } else {
+                // idk they're pushing empty stuff
+                self.filtered_instances.as_mut().unwrap().push((
+                    Instances::new(uncovered.attributes.clone()),
+                    Instances::new(uncovered.attributes.clone()),
+                ));
+            }
+        }
+
+        for j in index..size {
+            let mut stats = [0.0; 6]; // 6 statistics parameters
+            let filtered = self.compute_simple_stats(j, &data.1, &mut stats, None);
+            self.filtered_instances
+                .as_mut()
+                .unwrap()
+                .push(filtered.clone());
+            self.simple_stats.as_mut().unwrap().push(stats.to_vec());
+            data = filtered; // Data not covered
+        }
     }
 }

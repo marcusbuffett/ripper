@@ -2,9 +2,10 @@
 use rule::Rule;
 use tracing::{debug, warn};
 
-use rand;
-use rand::Rng;
-use std::collections::HashMap;
+use rand::{self, rngs::StdRng};
+use rand::{Rng, SeedableRng};
+use std::sync::OnceLock;
+use std::{cell::RefCell, collections::HashMap};
 
 mod antd;
 mod attribute;
@@ -21,35 +22,32 @@ use rule_set::RuleSet;
 use rule_stats::RuleStats;
 
 pub struct Rip {
-    class: Option<String>,
-    ruleset: Vec<Rule>,
-    distributions: Vec<Vec<f64>>,
-    optimizations: usize,
-    folds: usize,
-    min_no: f64,
-    debug: bool,
-    check_err: bool,
-    use_pruning: bool,
-    seed: u64,
-    total: f64,
-    ruleset_stats: Vec<RuleStats>,
+    pub class: Option<String>,
+    pub ruleset: RuleSet,
+    pub distributions: Vec<Vec<f64>>,
+    pub optimizations: usize,
+    pub folds: usize,
+    pub min_no: f64,
+    pub total: f64,
+    pub ruleset_stats: Vec<RuleStats>,
 }
 
 const MAX_DL_SURPLUS: f64 = 64.0;
+
+pub fn get_seeded_rng() -> StdRng {
+    static RNG: OnceLock<StdRng> = OnceLock::new();
+    RNG.get_or_init(|| StdRng::seed_from_u64(42)).clone()
+}
 
 impl Rip {
     pub fn new() -> Self {
         Rip {
             class: None,
-            ruleset: Vec::new(),
+            ruleset: RuleSet::new(),
             distributions: Vec::new(),
             optimizations: 2,
             folds: 3,
             min_no: 2.0,
-            debug: false,
-            check_err: true,
-            use_pruning: true,
-            seed: 1,
             total: 0.0,
             ruleset_stats: Vec::new(),
         }
@@ -60,8 +58,6 @@ impl Rip {
         // don't need to do this, as they will all have a class index
         // instances.delete_with_missing_class();
 
-        let mut rng = rand::thread_rng();
-
         self.total = RuleStats::num_all_conditions(instances) as f64;
         debug!("Number of all possible conditions = {}", self.total);
 
@@ -69,7 +65,7 @@ impl Rip {
         let mut data = instances.clone();
         data.sort_by_class_freq_asc();
 
-        self.ruleset = vec![];
+        self.ruleset = RuleSet::new();
         self.ruleset_stats = vec![];
         self.distributions = vec![];
 
@@ -93,9 +89,23 @@ impl Rip {
                 class_weight as f64,
             );
             debug!("Default DL: {}", default_dl);
-            let (rules, stats, data) =
+            let (rules, stats, remaining_data) =
                 self.ruleset_for_one_class(&data, expected_fp_rate, class_index, default_dl);
+            self.ruleset.rules.extend(rules);
+            self.ruleset_stats.push(stats);
+            data = remaining_data;
         }
+
+        for rule in self.ruleset.rules.iter_mut() {
+            rule.clean_up(&data.clone());
+        }
+        let mut default_rule = Rule::new();
+        dbg!(&data.num_classes(), &data, &data.attributes);
+        default_rule.consequent = data.num_classes() - 1;
+        self.ruleset.rules.push(default_rule);
+        debug!("Final classifier ruleset: {:?}", self.ruleset);
+
+        warn!("todo: distribution stuff?");
 
         Ok(())
     }
@@ -112,7 +122,7 @@ impl Rip {
         class_index: usize,
         default_description_length: f64,
     ) -> (Vec<Rule>, RuleStats, Instances) {
-        debug!("Generating a ruleset to predict {}", class_index);
+        debug!("\n\n\nGenerating a ruleset to predict {}", class_index);
         // let mut stop = false;
         let mut ruleset: Vec<Rule> = vec![];
 
@@ -120,7 +130,7 @@ impl Rip {
         let mut min_dl = default_description_length;
 
         let mut stats: Option<RuleStats> = None;
-        let mut rst = vec![];
+        let mut rst;
         let mut new_data: Instances = data.clone();
         let mut last_grow_data: Option<Instances> = None;
         let mut last_prune_data: Option<Instances> = None;
@@ -128,13 +138,8 @@ impl Rip {
         let mut has_positive = true;
 
         loop {
-            let mut new_data = RuleStats::stratify(&new_data, self.folds);
-            let (mut grow_data, prune_data) = Instances::partition(&new_data, self.folds);
-            dbg!(
-                &new_data.instances.len(),
-                &grow_data.instances.len(),
-                &prune_data.instances.len()
-            );
+            new_data = RuleStats::stratify(&new_data, self.folds);
+            let (mut grow_data, prune_data) = RuleStats::partition(&new_data, self.folds);
             last_grow_data = Some(grow_data.clone());
             last_prune_data = Some(prune_data.clone());
             let mut one_rule = Rule::new();
@@ -150,7 +155,7 @@ impl Rip {
             debug!("Rule after pruning: {:?}", one_rule);
             let mut stats = match stats {
                 None => {
-                    let mut stats = (RuleStats::new());
+                    let mut stats = RuleStats::new();
                     stats.total = self.total;
                     stats.data = Some(new_data.clone());
                     stats
@@ -177,9 +182,189 @@ impl Rip {
             }
         }
 
-        warn!("TODO: optimization stage");
+        for z in 0..self.optimizations {
+            debug!("Run #{z} of optimizing ruleset {:?}", ruleset);
 
-        debug!("Final ruleset: {:?}", ruleset);
+            let mut new_data = data.clone();
+            let mut final_ruleset_stat = RuleStats::new();
+            final_ruleset_stat.set_data(new_data.clone());
+            final_ruleset_stat.set_num_all_conds(self.total);
+            let mut position: i32 = 0;
+            let mut stop = false;
+            let mut is_residual;
+            let mut has_positive = true;
+            let mut dl = min_dl;
+            let mut min_dl = default_description_length;
+
+            while !stop && has_positive {
+                debug!(?position, ?stop, ?position, ?ruleset);
+                is_residual = position >= ruleset.len() as i32;
+                new_data = RuleStats::stratify(&new_data, self.folds);
+                let (mut grow_data, prune_data) = RuleStats::partition(&new_data, self.folds);
+
+                debug!(
+                    "\nRule #{} | isResidual? {} | data size: {}",
+                    position,
+                    is_residual,
+                    new_data.instances.len()
+                );
+
+                let final_rule = if is_residual {
+                    let mut new_rule = Rule::new();
+                    new_rule.consequent = class_index;
+                    debug!("Growing and pruning a new rule ...");
+                    new_rule.grow(&mut grow_data).expect("Grow failed");
+                    new_rule.prune(&prune_data, false);
+                    debug!("New rule found: {:?}", new_rule);
+                    new_rule
+                } else {
+                    let old_rule = &ruleset[position as usize];
+                    let covers = new_data
+                        .instances
+                        .iter()
+                        .any(|inst| old_rule.covers(&inst.borrow()));
+
+                    if !covers {
+                        final_ruleset_stat.add_and_update(old_rule);
+                        position += 1;
+                        continue;
+                    }
+
+                    debug!("Growing and pruning Replace ...");
+                    let mut replace = Rule::new();
+                    replace.consequent = class_index;
+                    replace.grow(&mut grow_data).expect("Grow failed");
+                    let prune_data = RuleStats::rm_covered_by_successives(
+                        &prune_data,
+                        &ruleset,
+                        position as usize,
+                    );
+                    replace.prune(&prune_data, true);
+
+                    debug!("Growing and pruning Revision ...");
+                    let mut revision = old_rule.clone();
+                    let mut new_grow_data = Instances::new(grow_data.attributes.clone());
+                    new_grow_data.instances = grow_data
+                        .instances
+                        .iter()
+                        .filter(|inst| revision.covers(&inst.borrow()))
+                        .cloned()
+                        .collect::<Vec<RefCell<Instance>>>();
+                    revision.grow(&mut new_grow_data).expect("Grow failed");
+                    revision.prune(&prune_data, true);
+
+                    let prev_rule_stats: Vec<&Vec<f64>> = (0..position)
+                        .map(|c| final_ruleset_stat.get_simple_stats(c as usize))
+                        .collect();
+
+                    let mut temp_rules = ruleset.clone();
+                    temp_rules[position as usize] = replace.clone();
+
+                    let mut rep_stat =
+                        RuleStats::new_with_data_and_rules(data.clone(), temp_rules.clone());
+                    rep_stat.set_num_all_conds(self.total);
+                    rep_stat.count_data_with(position as usize, &new_data, &prev_rule_stats);
+                    let rst = rep_stat.get_simple_stats(position as usize);
+                    debug!("Replace rule covers: {} | pos = {} | neg = {} \nThe rule doesn't cover: {} | pos = {}",
+                           rst[0], rst[2], rst[4], rst[1], rst[5]);
+
+                    let rep_dl = rep_stat.relative_dl(position as usize, expected_fp_rate);
+                    debug!("Replace: {:?} |dl = {}", replace, rep_dl);
+
+                    temp_rules[position as usize] = revision.clone();
+                    let mut rev_stat = RuleStats::new_with_data_and_rules(data.clone(), temp_rules);
+                    rev_stat.set_num_all_conds(self.total);
+                    rev_stat.count_data_with(
+                        position as usize,
+                        &new_data,
+                        &prev_rule_stats.as_slice(),
+                    );
+                    let rev_dl = rev_stat.relative_dl(position as usize, expected_fp_rate);
+                    debug!("Revision: {:?} |dl = {}", revision, rev_dl);
+
+                    let mut rstats =
+                        RuleStats::new_with_data_and_rules(data.clone(), ruleset.clone());
+                    rstats.set_num_all_conds(self.total);
+                    rstats.count_data_with(
+                        position as usize,
+                        &new_data,
+                        prev_rule_stats.as_slice(),
+                    );
+                    let old_dl = rstats.relative_dl(position as usize, expected_fp_rate);
+                    debug!("Old rule: {:?} |dl = {}", old_rule, old_dl);
+
+                    debug!(
+                        "\nrepDL: {} \nrevDL: {} \noldDL: {}",
+                        rep_dl, rev_dl, old_dl
+                    );
+                    debug!(
+                        "Old rule: {:#?}, replace rule: {:#?}, revision rule: {:#?}",
+                        old_rule, replace, revision
+                    );
+
+                    if old_dl <= rev_dl && old_dl <= rep_dl {
+                        old_rule.clone()
+                    } else if rev_dl <= rep_dl {
+                        revision
+                    } else {
+                        replace
+                    }
+                };
+
+                final_ruleset_stat.add_and_update(&final_rule);
+                let rst = final_ruleset_stat
+                    .get_simple_stats(position as usize)
+                    .clone();
+
+                if is_residual {
+                    dl += final_ruleset_stat.relative_dl(position as usize, expected_fp_rate);
+                    debug!("After optimization: the dl = {} | best: {}", dl, min_dl);
+
+                    if dl < min_dl {
+                        min_dl = dl;
+                    }
+
+                    stop = check_stop(&rst, min_dl, dl);
+                    if !stop {
+                        ruleset.push(final_rule);
+                    } else {
+                        final_ruleset_stat.remove_last();
+                        position -= 1;
+                    }
+                } else {
+                    ruleset[position as usize] = final_rule;
+                }
+
+                debug!("The rule covers: {} | pos = {} | neg = {} \nThe rule doesn't cover: {} | pos = {}",
+                       rst[0], rst[2], rst[4], rst[1], rst[5]);
+                debug!("Ruleset so far: {:?}", ruleset);
+
+                if final_ruleset_stat.get_ruleset_size() > 0 {
+                    new_data = final_ruleset_stat.get_filtered(position as usize).1.clone();
+                }
+                has_positive = rst[5] > 0.0;
+                position += 1;
+            }
+
+            if ruleset.len() > ((position + 1) as usize) {
+                for k in ((position + 1) as usize)..ruleset.len() {
+                    final_ruleset_stat.add_and_update(&ruleset[k]);
+                }
+            }
+
+            debug!("Deleting rules to decrease DL of the whole ruleset ...");
+            final_ruleset_stat.reduce_dl(expected_fp_rate);
+            let del = ruleset.len() - final_ruleset_stat.get_ruleset_size();
+            debug!("{} rules are deleted after DL reduction procedure", del);
+
+            ruleset = final_ruleset_stat
+                .get_ruleset()
+                .expect("Should have ruleset")
+                .to_vec();
+            stats = Some(final_ruleset_stat);
+        }
+
+        debug!("Final ruleset for {}: {:?}", class_index, ruleset);
 
         (
             ruleset.clone(),
@@ -220,6 +405,87 @@ mod tests {
     use attribute_info::NominalAttributeInfo;
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+    use std::collections::{HashMap, HashSet};
+    use std::fs::File;
+    use std::path::Path;
+
+    fn csv_to_instances<P: AsRef<Path> + Clone>(file_path: P) -> RefCell<Instances> {
+        let file = File::open(file_path.clone()).expect("Failed to open CSV file");
+        let mut reader = csv::Reader::from_reader(file);
+
+        let headers = reader
+            .headers()
+            .expect("Failed to read CSV headers")
+            .clone();
+
+        // First pass: collect unique values for each column
+        let mut column_values: Vec<HashSet<String>> = vec![HashSet::new(); headers.len()];
+        for result in reader.records() {
+            let record = result.expect("Failed to read CSV record");
+            for (i, field) in record.iter().enumerate() {
+                column_values[i].insert(field.to_string());
+            }
+        }
+
+        // Create attributes
+        let mut attributes = Vec::new();
+        for (i, header) in headers.iter().enumerate() {
+            let values: Vec<String> = column_values[i].iter().cloned().collect();
+            let attribute_info = NominalAttributeInfo::new(Some(values), header)
+                .expect("Failed to create NominalAttributeInfo");
+
+            attributes.push(Attribute {
+                name: header.to_string(),
+                index: i,
+                attribute_info: Some(attribute_info),
+            });
+        }
+
+        let mut dataset = RefCell::new(Instances::new(RefCell::new(attributes)));
+
+        // Second pass: add instances
+        let mut reader =
+            csv::Reader::from_reader(File::open(file_path).expect("Failed to open CSV file"));
+        debug!("Created reader!");
+        for result in reader.records() {
+            let record = result.expect("Failed to read CSV record");
+            let mut attribute_values = Vec::new();
+
+            for (i, field) in record.iter().enumerate() {
+                let attributes = &dataset.borrow().attributes;
+                let attr = &attributes.borrow()[i];
+                let value_index = attr
+                    .attribute_info
+                    .as_ref()
+                    .expect("Attribute info is missing")
+                    .hashtable
+                    .get(field)
+                    .expect("Failed to find value in attribute hashtable")
+                    .to_owned();
+                attribute_values.push(value_index);
+            }
+
+            let cloned_dataset = dataset.clone();
+            dataset.borrow_mut().instances.push(RefCell::new(Instance {
+                attribute_values,
+                dataset: Some(cloned_dataset),
+            }));
+        }
+
+        debug!("Created instances!");
+        dataset
+    }
+
+    #[test]
+    fn test_csv() {
+        tracing_subscriber::registry()
+            .with(fmt::layer())
+            .with(EnvFilter::new("ripper=debug"))
+            .init();
+        let dataset = csv_to_instances("./dragon.csv");
+        dbg!(&dataset);
+    }
+
     #[test]
     fn test_basic() {
         tracing_subscriber::registry()
@@ -258,11 +524,7 @@ mod tests {
             index: 0,
             attribute_info: Some(
                 NominalAttributeInfo::new(
-                    Some(vec![
-                        "first".to_string(),
-                        "second".to_string(),
-                        "third".to_string(),
-                    ]),
+                    Some(vec!["first".to_string(), "second".to_string()]),
                     "position",
                 )
                 .unwrap(),
@@ -271,7 +533,32 @@ mod tests {
         let mut dataset = RefCell::new(Instances::new(RefCell::new(attributes)));
         let cloned_dataset = dataset.clone();
         dataset.borrow_mut().instances.push(RefCell::new(Instance {
-            attribute_values: vec![0, 1, 1],
+            attribute_values: vec![0, 1, 0],
+            dataset: Some(cloned_dataset),
+        }));
+        let cloned_dataset = dataset.clone();
+        dataset.borrow_mut().instances.push(RefCell::new(Instance {
+            attribute_values: vec![0, 1, 0],
+            dataset: Some(cloned_dataset),
+        }));
+        let cloned_dataset = dataset.clone();
+        dataset.borrow_mut().instances.push(RefCell::new(Instance {
+            attribute_values: vec![1, 1, 1],
+            dataset: Some(cloned_dataset),
+        }));
+        let cloned_dataset = dataset.clone();
+        dataset.borrow_mut().instances.push(RefCell::new(Instance {
+            attribute_values: vec![1, 1, 1],
+            dataset: Some(cloned_dataset),
+        }));
+        let cloned_dataset = dataset.clone();
+        dataset.borrow_mut().instances.push(RefCell::new(Instance {
+            attribute_values: vec![1, 1, 1],
+            dataset: Some(cloned_dataset),
+        }));
+        let cloned_dataset = dataset.clone();
+        dataset.borrow_mut().instances.push(RefCell::new(Instance {
+            attribute_values: vec![1, 1, 1],
             dataset: Some(cloned_dataset),
         }));
         let cloned_dataset = dataset.clone();
@@ -281,7 +568,7 @@ mod tests {
         }));
         let cloned_dataset = dataset.clone();
         dataset.borrow_mut().instances.push(RefCell::new(Instance {
-            attribute_values: vec![1, 0, 0],
+            attribute_values: vec![1, 1, 1],
             dataset: Some(cloned_dataset),
         }));
         let cloned_dataset = dataset.clone();

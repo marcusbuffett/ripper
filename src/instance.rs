@@ -23,13 +23,23 @@ impl Instances {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Instance {
     // index of the attribute value, since strings are slow
     pub attribute_values: Vec<usize>,
     // pub weight: f64,
     // pub numeric_after_decimal_point: i32,
     pub dataset: Option<RefCell<Instances>>,
+}
+
+impl std::fmt::Debug for Instance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Instance {{ attribute_values: {:?} }}",
+            self.attribute_values
+        )
+    }
 }
 
 impl Instance {
@@ -115,21 +125,6 @@ impl Instances {
             .collect_vec()
     }
 
-    pub fn partition(data: &Instances, num_folds: usize) -> (Instances, Instances) {
-        let splits = data.instances.len() * (num_folds - 1) / num_folds;
-
-        let first_partition = Instances {
-            attributes: data.attributes.clone(),
-            instances: data.instances[0..splits].to_vec(),
-        };
-
-        let second_partition = Instances {
-            attributes: data.attributes.clone(),
-            instances: data.instances[splits..].to_vec(),
-        };
-
-        (first_partition, second_partition)
-    }
 
     pub fn num_classes(&self) -> usize {
         self.attributes

@@ -1,21 +1,21 @@
 use itertools::Itertools;
-use std::borrow::Borrow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::attribute::Attribute;
 
 #[derive(Clone, Debug)]
 pub struct Instances {
-    pub instances: Vec<RefCell<Instance>>,
-    pub attributes: RefCell<Vec<Attribute>>,
+    pub instances: Vec<Rc<RefCell<Instance>>>,
+    pub attributes: Rc<RefCell<Vec<Attribute>>>,
 }
 
 impl Instances {
-    pub fn new(attributes: RefCell<Vec<Attribute>>) -> Self {
+    pub fn new(attributes: Rc<RefCell<Vec<Attribute>>>) -> Self {
         Instances {
             instances: vec![],
             attributes: attributes,
@@ -29,7 +29,7 @@ pub struct Instance {
     pub attribute_values: Vec<usize>,
     // pub weight: f64,
     // pub numeric_after_decimal_point: i32,
-    pub dataset: Option<RefCell<Instances>>,
+    pub dataset: Option<Rc<RefCell<Instances>>>,
 }
 
 impl std::fmt::Debug for Instance {
@@ -105,15 +105,14 @@ impl Instances {
         });
     }
 
-    pub fn class_frequencies(&self) -> HashMap<usize, usize> {
-        let class_frequencies = self
-            .instances
-            .iter()
-            .map(|i| (*i).borrow().class_value())
-            .counts()
-            .into_iter()
-            .map(|(k, v)| (k.clone(), v))
-            .collect::<HashMap<usize, usize>>();
+    pub fn class_frequencies(&self) -> BTreeMap<usize, usize> {
+        let mut class_frequencies = BTreeMap::new();
+        for inst in self.instances.iter() {
+            let class_frequencies = class_frequencies
+                .entry(inst.borrow().class_value())
+                .or_insert(0);
+            *class_frequencies += 1;
+        }
         class_frequencies
     }
 
@@ -124,7 +123,6 @@ impl Instances {
             .sorted_by_key(|(_, v)| *v)
             .collect_vec()
     }
-
 
     pub fn num_classes(&self) -> usize {
         self.attributes

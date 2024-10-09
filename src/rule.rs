@@ -60,7 +60,8 @@ impl Rule {
         let mut def_ac_rt = (def_accu + 1.0) / (sum_of_weights as f64 + 1.0);
 
         // Keep the record of which attributes have already been used
-        let mut used = vec![false; grow_data.attributes.borrow().len()];
+        // minus 1 for class value
+        let mut used = vec![false; grow_data.attributes.borrow().len() - 1];
         let mut num_unused = used.len();
 
         // If there are already antecedents existing
@@ -75,7 +76,13 @@ impl Rule {
             let mut cover_data: Option<Instances> = None;
 
             // Build one condition based on all attributes not used yet
-            for (i, attr) in grow_data.attributes.borrow().iter().enumerate() {
+            for (i, attr) in grow_data
+                .attributes
+                .borrow()
+                .iter()
+                .dropping_back(1)
+                .enumerate()
+            {
                 debug!("One condition: size = {}", grow_data.instances.len());
 
                 // todo: performance opportunity
@@ -173,7 +180,6 @@ impl Rule {
                 worth_rt[x] = (worth_value[x] + 1.0) / (coverage[x] + 2.0);
             }
         }
-        dbg!(&worth_rt, &coverage, &worth_value);
 
         let mut max_value = (def_accu + 1.0) / (total as f64 + 2.0);
         let mut max_index = -1;

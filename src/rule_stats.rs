@@ -1,7 +1,5 @@
 // rule_stats.rs
 
-use std::borrow::Borrow;
-
 use rand::seq::SliceRandom;
 use tracing::debug;
 
@@ -9,6 +7,7 @@ use crate::{get_seeded_rng, Instances, Rule};
 
 const REDUNDANCY_FACTOR: f64 = 0.5;
 const MDL_THEORY_WEIGHT: f64 = 1.0;
+
 #[derive(Debug, Clone)]
 pub struct RuleStats {
     pub data: Option<Instances>,
@@ -113,7 +112,7 @@ impl RuleStats {
         self.distributions = Some(Vec::with_capacity(size));
         let mut data = self.data.as_ref().unwrap().clone();
 
-        for i in 0..size {
+        for i in 0..(size) {
             let mut stats = [0.0; 6]; // 6 statistics parameters
             let mut class_counts = vec![0.0; self.data.as_ref().unwrap().num_classes()];
             let filtered = self.compute_simple_stats(i, &data, &mut stats, Some(&mut class_counts));
@@ -439,7 +438,7 @@ impl RuleStats {
         }
 
         // Remove rules in reverse order to maintain correct indices
-        for &k in to_remove.iter().rev() {
+        for &k in to_remove.iter() {
             self.ruleset
                 .as_mut()
                 .expect("Should have ruleset")
